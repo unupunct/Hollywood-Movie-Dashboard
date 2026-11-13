@@ -19,7 +19,7 @@ foreach ($l in $links) {
 $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$app"
 New-Item -Force $key | Out-Null
 Set-ItemProperty $key DisplayName 'HoloGrid'
-Set-ItemProperty $key DisplayVersion '2.1.0'
+Set-ItemProperty $key DisplayVersion '2.1.1'
 Set-ItemProperty $key Publisher 'unupunct'
 Set-ItemProperty $key InstallLocation $dir
 Set-ItemProperty $key DisplayIcon $exe

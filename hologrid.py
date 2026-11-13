@@ -1089,12 +1089,62 @@ def desktop_sizes():
     return [(info.current_w, info.current_h)]
 
 
+def open_identify(sizes):
+    """Flash a big number on every monitor (one small borderless window per display)."""
+    try:
+        from pygame._sdl2.video import Window, Renderer
+    except Exception:
+        return []
+    out = []
+    for i, (mw, mh) in enumerate(sizes):
+        try:
+            pos = 0x2FFF0000 | i     # SDL_WINDOWPOS_CENTERED_DISPLAY(i)
+            w = Window("Display %d" % (i + 1), size=(460, 280), position=(pos, pos), borderless=True, always_on_top=True)
+            out.append((w, Renderer(w), i, (mw, mh)))
+        except Exception:
+            pass
+    return out
+
+
+def draw_identify(wins, sel):
+    try:
+        from pygame._sdl2.video import Texture
+        big = pygame.font.SysFont("consolas,couriernew,monospace", 150, bold=True)
+        small = pygame.font.SysFont("consolas,couriernew,monospace", 26, bold=True)
+        for w, r, i, (mw, mh) in wins:
+            on = i == sel
+            r.draw_color = (4, 8, 15, 255)
+            r.clear()
+            r.draw_color = (0, 229, 255, 255) if on else (255, 176, 32, 255)
+            for k in range(4):
+                r.draw_rect((k, k, 460 - 2 * k, 280 - 2 * k))
+            for surf, y in ((big.render(str(i + 1), True, (200, 238, 255)), 135),
+                            (small.render("%d x %d%s" % (mw, mh, "  PRIMARY" if i == 0 else ""), True, (255, 176, 32)), 245)):
+                tex = Texture.from_surface(r, surf)
+                rc = surf.get_rect(center=(230, y))
+                r.blit(tex, rc)
+            r.present()
+    except Exception:
+        pass
+
+
+def close_identify(wins):
+    for w, r, i, sz in wins:
+        try:
+            w.destroy()
+        except Exception:
+            pass
+
+
 def run_setup(cfg):
     """First-start setup: choose the monitor and whether to start fullscreen. Returns cfg or None."""
     sizes = desktop_sizes()
     sel = min(cfg.get("monitor", 0), len(sizes) - 1)
     full = bool(cfg.get("fullscreen", True))
-    WW, WH = 820, 520
+    per = min(4, len(sizes))
+    rows = (len(sizes) + per - 1) // per
+    fy = 160 + rows * 144 + 20
+    WW, WH = 820, fy + 64 + 48 + 64
     BG, FG, ACC, ACC2, DIM = (4, 8, 15), (200, 238, 255), (0, 229, 255), (255, 176, 32), (34, 62, 82)
 
     def open_win():
@@ -1108,19 +1158,21 @@ def run_setup(cfg):
     f_title, f_mid, f_sm = fn(34, True), fn(17), fn(14)
     clock = pygame.time.Clock()
     cards = []
-    per = min(4, len(sizes))
     cw_, ch_ = 170, 130
     x0 = (WW - (per * cw_ + (per - 1) * 16)) // 2
     for i in range(len(sizes)):
-        cards.append(pygame.Rect(x0 + (i % per) * (cw_ + 16), 170 + (i // per) * (ch_ + 14), cw_, ch_))
-    check = pygame.Rect(60, 400, 26, 26)
-    start_btn = pygame.Rect(WW - 260, 410, 200, 48)
+        cards.append(pygame.Rect(x0 + (i % per) * (cw_ + 16), 160 + (i // per) * (ch_ + 14), cw_, ch_))
+    check = pygame.Rect(60, fy, 26, 26)
+    start_btn = pygame.Rect(WW - 260, fy + 64, 200, 48)
+    ident_btn = pygame.Rect(WW - 480, fy + 64, 200, 48)
+    idw, idt = [], 0.0
     t = 0.0
     while True:
         dt = clock.tick(30) / 1000
         t += dt
         change = None
         go = False
+        ident = False
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 return None
@@ -1135,6 +1187,8 @@ def run_setup(cfg):
                     change = e.key - pygame.K_1
                 elif e.key in (pygame.K_SPACE, pygame.K_f):
                     full = not full
+                elif e.key == pygame.K_i:
+                    ident = True
                 elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
                     go = True
             if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
@@ -1145,7 +1199,22 @@ def run_setup(cfg):
                     full = not full
                 if start_btn.collidepoint(e.pos):
                     go = True
+                if ident_btn.collidepoint(e.pos):
+                    ident = True
+        if ident:
+            close_identify(idw)
+            idw, idt = open_identify(sizes), 3.0
+            if not idw:
+                idt = 0.0
+        if idw:
+            idt -= dt
+            if idt <= 0:
+                close_identify(idw)
+                idw = []
+            else:
+                draw_identify(idw, sel)
         if go:
+            close_identify(idw)
             cfg = dict(cfg)
             cfg["monitor"], cfg["fullscreen"] = sel, full
             return cfg
@@ -1186,13 +1255,17 @@ def run_setup(cfg):
         pygame.draw.rect(win, ACC if full else DIM, check, 2)
         if full:
             pygame.draw.rect(win, ACC, check.inflate(-10, -10))
-        win.blit(f_mid.render("Start in fullscreen", True, FG), (100, 398))
-        win.blit(f_sm.render("F11 toggles fullscreen or window any time.", True, (120, 160, 185)), (100, 424))
+        win.blit(f_mid.render("Start in fullscreen", True, FG), (100, fy - 2))
+        win.blit(f_sm.render("F11 toggles fullscreen or window any time.", True, (120, 160, 185)), (100, fy + 26))
+        pygame.draw.rect(win, (7, 15, 25), ident_btn, 0, border_radius=6)
+        pygame.draw.rect(win, ACC2, ident_btn, 2, border_radius=6)
+        lab = f_mid.render("IDENTIFY  [I]", True, ACC2)
+        win.blit(lab, lab.get_rect(center=ident_btn.center))
         pulse = 0.5 + 0.5 * math.sin(t * 4)
         pygame.draw.rect(win, (0, int(120 + 80 * pulse), int(150 + 80 * pulse)), start_btn, 0, border_radius=6)
         lab = f_mid.render("START  [Enter]", True, (0, 10, 16))
         win.blit(lab, lab.get_rect(center=start_btn.center))
-        win.blit(f_sm.render("Left/Right or 1-9: monitor   Space: fullscreen   Esc: quit", True, (90, 130, 155)), (42, WH - 34))
+        win.blit(f_sm.render("Left/Right or 1-9: monitor   I: identify   Space: fullscreen   Esc: quit", True, (90, 130, 155)), (42, WH - 34))
         pygame.display.flip()
 
 

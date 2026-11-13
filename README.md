@@ -47,7 +47,7 @@ Download **`HoloGrid-Setup.exe`** from the [latest release](../../releases/lates
 
 ## First start & setup
 
-The first time you launch HoloGrid a short **setup screen** lets you pick which monitor to use (the setup window jumps to the monitor you select so you can identify it) and whether to start in fullscreen. Your choice is saved to `%APPDATA%\HoloGrid\config.json`. HoloGrid then starts fullscreen on that monitor; press **F11** to drop to a resizable window — the graphics re-render at the new size. Press **F2** any time to reopen setup.
+The first time you launch HoloGrid a short **setup screen** lets you pick which monitor to use (the setup window jumps to the monitor you select so you can identify it) and whether to start in fullscreen. Your choice is saved to `%APPDATA%\HoloGrid\config.json`. HoloGrid then starts fullscreen on that monitor; press **F11** to drop to a resizable window — the graphics re-render at the new size. Press **Identify** (or `I`) to flash a big number on every monitor so you know which is which. Press **F2** any time to reopen setup.
 
 ## Controls
 
