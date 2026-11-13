@@ -1,8 +1,9 @@
 """HOLOGRID - procedural sci-fi HUD generator, 11 themes, 60 fps.
 
-Keys: T / Shift+T next/prev theme | 1-9,0,- jump to theme | F11 fullscreen
-      SPACE pause | S screenshot | ESC quit
+Keys: T / Shift+T next/prev theme | 1-9,0,- jump to theme | F11 fullscreen/window
+      M next monitor | F2 setup | SPACE pause | S screenshot | ESC quit
 """
+import json
 import math
 import os
 import random
@@ -29,6 +30,46 @@ BARS = ("uplink", "mesh", "lattice", "vault", "relay", "decoy")
 DEF_TELE = ["cam   xz {d:+.1f}° el {a:.1f}°", "ring  r {a:.2f}  n {b}", "cells {b} / 1089",
             "hops  {c} threads", "head  0x{b:04X}", "phase verify", "frame {f}", "heap  0x{h:08X}"]
 DEF_LOGS = ["handshake ok", "route recalc", "checksum pass", "heartbeat", "sync nominal", "latency ok"]
+
+
+# ---- resolution-independent drawing: all coordinates are logical (1600x1000 design space) ----
+S = 1.0       # logical -> pixel scale
+OX = 0.0      # logical offset (centres the design space on the canvas)
+OY = 0.0
+_pd = pygame.draw
+
+
+class _Draw:
+    @staticmethod
+    def line(surf, col, a, b, w=1):
+        _pd.line(surf, col, ((a[0] + OX) * S, (a[1] + OY) * S), ((b[0] + OX) * S, (b[1] + OY) * S), max(1, int(w * S + 0.5)))
+
+    @staticmethod
+    def lines(surf, col, closed, pts, w=1):
+        _pd.lines(surf, col, closed, [((x + OX) * S, (y + OY) * S) for x, y in pts], max(1, int(w * S + 0.5)))
+
+    @staticmethod
+    def circle(surf, col, c, r, w=0):
+        _pd.circle(surf, col, ((c[0] + OX) * S, (c[1] + OY) * S), max(1, int(r * S + 0.5)), max(1, int(w * S + 0.5)) if w else 0)
+
+    @staticmethod
+    def rect(surf, col, rect, w=0, border_radius=0):
+        x, y, ww, hh = rect
+        _pd.rect(surf, col, (int((x + OX) * S + 0.5), int((y + OY) * S + 0.5), max(1, int(ww * S + 0.5)), max(1, int(hh * S + 0.5))),
+                 max(1, int(w * S + 0.5)) if w else 0, border_radius=int(border_radius * S))
+
+    @staticmethod
+    def ellipse(surf, col, rect, w=0):
+        x, y, ww, hh = rect
+        _pd.ellipse(surf, col, (int((x + OX) * S + 0.5), int((y + OY) * S + 0.5), max(2, int(ww * S + 0.5)), max(2, int(hh * S + 0.5))),
+                    max(1, int(w * S + 0.5)) if w else 0)
+
+    @staticmethod
+    def polygon(surf, col, pts, w=0):
+        _pd.polygon(surf, col, [((x + OX) * S, (y + OY) * S) for x, y in pts], max(1, int(w * S + 0.5)) if w else 0)
+
+
+D = _Draw
 
 
 def L(a, b, t):
@@ -229,7 +270,8 @@ class Hud:
         self.t = 0.0
         self.frame = 0
         self.paused = False
-        self.scene = pygame.Surface((W, H)).convert()
+        self.scene = None
+        self.cw, self.ch = W, H
         self.fonts = {}
         self.cache = {}
         self.logs = deque(maxlen=9)
@@ -240,13 +282,25 @@ class Hud:
         self.toast_t = -10
         self.vt = -1
         self.rng = random.Random(11)
-        self.set_theme(start)
+        self.ti = start % len(THEMES)
+
+    def configure(self, surface):
+        """(Re)bind to a drawing surface and rebuild every resolution-dependent asset."""
+        global S, OX, OY
+        self.scene = surface
+        self.cw, self.ch = surface.get_size()
+        S = min(self.cw / W, self.ch / H)
+        OX = (self.cw / S - W) / 2
+        OY = (self.ch / S - H) / 2
+        self.fonts.clear()
+        self.cache.clear()
+        self.set_theme(self.ti, toast=False)
 
     # ---------- infrastructure ----------
     def font(self, size, bold=False):
         k = (size, bold)
         if k not in self.fonts:
-            self.fonts[k] = pygame.font.SysFont("consolas,couriernew,monospace", size, bold=bold)
+            self.fonts[k] = pygame.font.SysFont("consolas,couriernew,monospace", max(7, int(size * S + 0.5)), bold=bold)
         return self.fonts[k]
 
     def text(self, s, size, color, pos, anchor="tl", bold=False, surf=None):
@@ -259,14 +313,21 @@ class Hud:
             self.cache[key] = img
         r = img.get_rect()
         setattr(r, {"tl": "topleft", "tr": "topright", "tc": "midtop", "c": "center",
-                    "ml": "midleft", "mr": "midright"}[anchor], pos)
+                    "ml": "midleft", "mr": "midright"}[anchor], (int((pos[0] + OX) * S), int((pos[1] + OY) * S)))
         (surf or self.scene).blit(img, r)
+
+    def fillr(self, surf, color, rect):
+        x, y, w, h = rect
+        surf.fill(color, (int((x + OX) * S), int((y + OY) * S), max(1, int(w * S + 0.5)), max(1, int(h * S + 0.5))))
+
+    def clip(self, surf, rect):
+        surf.set_clip((int((rect.x + OX) * S), int((rect.y + OY) * S), int(rect.w * S + 1), int(rect.h * S + 1)))
 
     def arc(self, r, a0, a1, col, w=1, c=C, surf=None):
         n = max(6, int(abs(a1 - a0) * r / 6))
         pts = [(c[0] + math.cos(a0 + (a1 - a0) * i / n) * r, c[1] + math.sin(a0 + (a1 - a0) * i / n) * r)
                for i in range(n + 1)]
-        pygame.draw.lines(surf or self.scene, col, False, pts, w)
+        D.lines(surf or self.scene, col, False, pts, w)
 
     def dashed(self, surf, r, col, dashes=90, c=C, rot=0.0, frac=0.55, w=1):
         step = TAU / dashes
@@ -275,7 +336,7 @@ class Hud:
             self.arc(r, a, a + step * frac, col, w, c, surf)
 
     # ---------- theme setup ----------
-    def set_theme(self, i):
+    def set_theme(self, i, toast=True):
         self.ti = i % len(THEMES)
         self.th = th = THEMES[self.ti]
         p = th["pal"]
@@ -293,7 +354,8 @@ class Hud:
         self.logs.clear()
         self.next_log = self.t
         self.peaks = {}
-        self.toast_t = self.t
+        if toast:
+            self.toast_t = self.t
         self.setup_center()
         self.build_static()
         self.update_vals(force=True)
@@ -343,83 +405,85 @@ class Hud:
     def build_static(self):
         th = self.th
         bg, dim, fg, acc = self.bg, self.dim, self.fg, self.acc
-        s = pygame.Surface((W, H)).convert()
+        s = pygame.Surface((self.cw, self.ch)).convert()
         s.fill(bg)
+        lx0, ly0 = -OX, -OY
+        lx1, ly1 = self.cw / S - OX, self.ch / S - OY
+        gx0, gy0 = int(lx0 // 100) * 100, int(ly0 // 100) * 100
         if th.get("grid") == "lines":
-            for x in range(0, W, 20):
-                pygame.draw.line(s, L(bg, dim, 0.45 if x % 100 else 0.9), (x, 0), (x, H))
-            for y in range(0, H, 20):
-                pygame.draw.line(s, L(bg, dim, 0.45 if y % 100 else 0.9), (0, y), (W, y))
+            for x in range(gx0, int(lx1) + 1, 20):
+                D.line(s, L(bg, dim, 0.45 if x % 100 else 0.9), (x, ly0), (x, ly1))
+            for y in range(gy0, int(ly1) + 1, 20):
+                D.line(s, L(bg, dim, 0.45 if y % 100 else 0.9), (lx0, y), (lx1, y))
         else:
-            for x in range(0, W, 40):
-                for y in range(0, H, 40):
-                    s.set_at((x, y), L(bg, dim, 0.9))
+            for x in range(gx0, int(lx1) + 1, 40):
+                for y in range(gy0, int(ly1) + 1, 40):
+                    self.fillr(s, L(bg, dim, 0.9), (x, y, 1, 1))
         ring = th["ring"]
         faint = L(bg, dim, 0.8)
         if ring == "full":
-            pygame.draw.line(s, L(bg, dim, 0.7), (C[0] - 400, C[1]), (C[0] + 400, C[1]))
-            pygame.draw.line(s, L(bg, dim, 0.7), (C[0], C[1] - 360), (C[0], C[1] + 340))
+            D.line(s, L(bg, dim, 0.7), (C[0] - 400, C[1]), (C[0] + 400, C[1]))
+            D.line(s, L(bg, dim, 0.7), (C[0], C[1] - 360), (C[0], C[1] + 340))
             for r in (60, 110, 160, 200, 250, 280):
-                pygame.draw.circle(s, faint, C, r, 1)
+                D.circle(s, faint, C, r, 1)
             self.dashed(s, 300, L(bg, acc, 0.35), 90)
         if ring in ("full", "ticks"):
             self.dashed(s, 345, dim, 120)
             for d in range(0, 360, 2):
                 a = math.radians(d) - PI / 2
                 ln = 12 if d % 10 == 0 else 5
-                pygame.draw.line(s, dim if d % 10 else fg, pol(C, 330, a), pol(C, 330 + ln, a))
-            f = self.font(12)
+                D.line(s, dim if d % 10 else fg, pol(C, 330, a), pol(C, 330 + ln, a))
             for d in range(0, 360, 30):
                 a = math.radians(d) - PI / 2
-                img = f.render("%03d°" % d, True, self.dimt)
-                s.blit(img, img.get_rect(center=pol(C, 362, a)))
+                self.text("%03d°" % d, 12, self.dimt, pol(C, 362, a), "c", surf=s)
         if ring == "edge":
-            pygame.draw.circle(s, dim, C, 340, 1)
+            D.circle(s, dim, C, 340, 1)
             self.dashed(s, 350, dim, 120)
             for d in range(0, 360, 10):
                 a = math.radians(d) - PI / 2
-                pygame.draw.line(s, dim, pol(C, 340, a), pol(C, 346, a))
+                D.line(s, dim, pol(C, 340, a), pol(C, 346, a))
         if ring == "box":
-            pygame.draw.rect(s, dim, BOX, 1)
+            D.rect(s, dim, BOX, 1)
             for (px, py, dx, dy) in ((BOX.x, BOX.y, 1, 1), (BOX.right, BOX.y, -1, 1), (BOX.x, BOX.bottom, 1, -1), (BOX.right, BOX.bottom, -1, -1)):
-                pygame.draw.line(s, acc, (px, py), (px + dx * 22, py), 2)
-                pygame.draw.line(s, acc, (px, py), (px, py + dy * 22), 2)
+                D.line(s, acc, (px, py), (px + dx * 22, py), 2)
+                D.line(s, acc, (px, py), (px, py + dy * 22), 2)
         if th["center"] == "radar":
             for ri, r in enumerate((205, 213, 221)):
                 for i in range(72):
                     a = i / 72 * TAU - PI / 2
-                    pygame.draw.line(s, dim, pol(C, r, a), pol(C, r + 6, a))
+                    D.line(s, dim, pol(C, r, a), pol(C, r + 6, a))
         # scanlines + vignette baked in
-        ov = pygame.Surface((W, H), pygame.SRCALPHA)
+        ov = pygame.Surface((self.cw, self.ch), pygame.SRCALPHA)
         sl = 38 if self.glow else 10
-        for y in range(0, H, 3):
-            pygame.draw.line(ov, (0, 0, 0, sl), (0, y), (W, y))
+        step = max(3, int(3 * S + 0.5))
+        for y in range(0, self.ch, step):
+            _pd.line(ov, (0, 0, 0, sl), (0, y), (self.cw, y))
         vg = pygame.Surface((64, 40), pygame.SRCALPHA)
         for x in range(64):
             for y in range(40):
                 d = math.hypot((x - 31.5) / 32, (y - 19.5) / 20)
                 vg.set_at((x, y), (0, 0, 0, int(max(0, d - 0.65) * (190 if self.glow else 70))))
-        ov.blit(pygame.transform.smoothscale(vg, (W, H)), (0, 0))
+        ov.blit(pygame.transform.smoothscale(vg, (self.cw, self.ch)), (0, 0))
         s.blit(ov, (0, 0))
         # header + panel frames
         self.text(th["title"], 38, fg, (20, 8), bold=True, surf=s)
         self.text(th["sub"], 13, self.dimt, (22, 50), surf=s)
         for i, st in enumerate(th["stats"]):
             x = 780 + i * 200
-            pygame.draw.line(s, dim, (x - 12, 6), (x - 12, 56))
+            D.line(s, dim, (x - 12, 6), (x - 12, 56))
             self.text(st[0], 11, self.dimt, (x, 6), surf=s)
-        pygame.draw.line(s, acc, (0, 62), (W, 62))
+        D.line(s, acc, (lx0, 62), (lx1, 62))
         tk = "   //   ".join(th["ticker"] * 4) + "   //   "
         self.ticker = self.font(12).render(tk, True, L(bg, fg, 0.55))
         for i, (rect, ang) in enumerate(CALLS):
             x, y, w, h = rect
-            pygame.draw.rect(s, self.panelc, rect)
-            pygame.draw.rect(s, dim, rect, 1)
+            D.rect(s, self.panelc, rect)
+            D.rect(s, dim, rect, 1)
             self.text(th["callouts"][i][0], 12, acc, (x + 8, y + 6), bold=True, surf=s)
             tgt = pol(C, 346, ang)
             sx = x + w if tgt[0] > x + w else x
-            pygame.draw.line(s, acc, (sx, y + h // 2), tgt)
-            pygame.draw.circle(s, self.acc2, (int(tgt[0]), int(tgt[1])), 3)
+            D.line(s, acc, (sx, y + h // 2), tgt)
+            D.circle(s, self.acc2, (int(tgt[0]), int(tgt[1])), 3)
         for i, rect in enumerate(BOTTOM):
             self.bake_frame(s, rect, th["panels"][i][1], "%02d" % (i + 1))
         for i, rect in enumerate(SCOPES):
@@ -428,12 +492,12 @@ class Hud:
 
     def bake_frame(self, s, rect, title, num):
         x, y, w, h = rect
-        pygame.draw.rect(s, self.panelc, rect)
-        pygame.draw.rect(s, self.dim, rect, 1)
+        D.rect(s, self.panelc, rect)
+        D.rect(s, self.dim, rect, 1)
         for (px, py, dx, dy) in ((x, y, 1, 1), (x + w, y, -1, 1), (x, y + h, 1, -1), (x + w, y + h, -1, -1)):
-            pygame.draw.line(s, self.acc, (px, py), (px + dx * 14, py), 2)
-            pygame.draw.line(s, self.acc, (px, py), (px, py + dy * 14), 2)
-        pygame.draw.line(s, self.dim, (x + 8, y + 24), (x + w - 8, y + 24))
+            D.line(s, self.acc, (px, py), (px + dx * 14, py), 2)
+            D.line(s, self.acc, (px, py), (px, py + dy * 14), 2)
+        D.line(s, self.dim, (x + 8, y + 24), (x + w - 8, y + 24))
         if num:
             self.text(num, 12, self.acc, (x + 10, y + 6), bold=True, surf=s)
             self.text(title, 12, self.fg, (x + 36, y + 6), surf=s)
@@ -508,8 +572,8 @@ class Hud:
             label = "%02d/%02d  %s" % (self.ti + 1, len(THEMES), self.th["name"])
             r = pygame.Rect(0, 0, 360, 64)
             r.center = (800, 440)
-            pygame.draw.rect(sc, self.panelc, r)
-            pygame.draw.rect(sc, L(self.panelc, self.acc, fade), r, 2)
+            D.rect(sc, self.panelc, r)
+            D.rect(sc, L(self.panelc, self.acc, fade), r, 2)
             self.text(label, 30, L(self.panelc, self.fg, fade), r.center, "c", bold=True)
 
     def draw_header(self):
@@ -517,9 +581,10 @@ class Hud:
         for i, val in enumerate(self.stat_vals):
             self.text(val, 26, self.acc2 if i == 1 else self.fg, (780 + i * 200, 22), bold=True)
         w = self.ticker.get_width()
-        x = -int(self.t * 50) % w - w
-        while x < W:
-            sc.blit(self.ticker, (x, 68))
+        x = -int(self.t * 50 * S) % w - w
+        ty = int((68 + OY) * S)
+        while x < self.cw:
+            sc.blit(self.ticker, (x, ty))
             x += w
 
     def draw_pill(self):
@@ -527,9 +592,9 @@ class Hud:
         n = self.nodes[int(self.t / 3.5) % 6]
         pill = pygame.Rect(0, 0, 250, 26)
         pill.center = (C[0], 118)
-        pygame.draw.rect(sc, self.panelc, pill, border_radius=13)
-        pygame.draw.rect(sc, self.acc, pill, 1, border_radius=13)
-        pygame.draw.circle(sc, self.acc2, (pill.x + 16, pill.centery), 4)
+        D.rect(sc, self.panelc, pill, border_radius=13)
+        D.rect(sc, self.acc, pill, 1, border_radius=13)
+        D.circle(sc, self.acc2, (pill.x + 16, pill.centery), 4)
         self.text(self.th["pill"].format(id=n[0].upper()), 13, self.fg, (pill.x + 30, pill.centery), "ml", bold=True)
 
     def draw_callouts(self):
@@ -545,23 +610,23 @@ class Hud:
             x, y, w, h = rect
             ix, iy, iw, ih = x + 10, y + 32, w - 20, h - 42
             mid = iy + ih // 2
-            pygame.draw.line(sc, self.dim, (ix, mid), (ix + iw, mid))
+            D.line(sc, self.dim, (ix, mid), (ix + iw, mid))
             seed = k * 2.0
             pts = [(ix + i, mid + (math.sin(i * 0.09 + t * 2 + seed) * math.sin(i * 0.021 - t * 0.8 + seed * 2)
                                    + 0.25 * math.sin(i * 0.4 + t * 5)) * ih * 0.38) for i in range(0, iw, 2)]
-            pygame.draw.lines(sc, self.acc2 if k else self.acc, False, pts, 1)
+            D.lines(sc, self.acc2 if k else self.acc, False, pts, 1)
         x0 = 1440
         hl = int(t * 6) % len(self.hexrows)
         for i, row in enumerate(self.hexrows):
             col = self.acc if i == hl else (self.fg if i % 5 == 0 else self.dimt)
             self.text(row, 11, col, (x0, 96 + i * 14))
         rc = (110, 690)
-        pygame.draw.circle(sc, self.dim, rc, 80, 1)
-        pygame.draw.circle(sc, self.dim, rc, 40, 1)
+        D.circle(sc, self.dim, rc, 80, 1)
+        D.circle(sc, self.dim, rc, 40, 1)
         for i in range(24):
             a = i / 24 * TAU
             v = 0.25 + 0.75 * abs(math.sin(i * 0.8 + t * 0.9) * math.sin(i * 0.31 - t * 0.4))
-            pygame.draw.line(sc, self.acc2 if i % 6 == 0 else self.acc, pol(rc, 6, a), pol(rc, 6 + v * 72, a), 4)
+            D.line(sc, self.acc2 if i % 6 == 0 else self.acc, pol(rc, 6, a), pol(rc, 6 + v * 72, a), 4)
         self.text(self.th["rose"], 11, self.dimt, (rc[0], rc[1] + 92), "c")
         gc = (1490, 690)
         self.arc(78, math.radians(135), math.radians(405), self.dim, 6, gc)
@@ -575,7 +640,7 @@ class Hud:
         blink = int(t * 2) % 2
         for i, rect in enumerate(BOTTOM):
             x, y, w, h = rect
-            pygame.draw.circle(sc, self.acc2 if blink else self.dim, (x + w - 14, y + 12), 3)
+            D.circle(sc, self.acc2 if blink else self.dim, (x + w - 14, y + 12), 3)
             kind, _, extra = self.th["panels"][i]
             r = pygame.Rect(x + 10, y + 32, w - 20, h - 42)
             getattr(self, "p_" + kind)(r, extra, i)
@@ -587,22 +652,22 @@ class Hud:
             v = 0.5 + 0.45 * math.sin(t * (0.3 + i * 0.11) + i * 1.7 + k)
             self.text(name, 12, self.fg, (r.x, yy))
             bx, bw = r.x + 80, r.w - 130
-            pygame.draw.rect(sc, self.dim, (bx, yy + 3, bw, 10), 1)
-            pygame.draw.rect(sc, self.acc2 if i == 5 else self.acc, (bx + 2, yy + 5, int((bw - 4) * v), 6))
+            D.rect(sc, self.dim, (bx, yy + 3, bw, 10), 1)
+            D.rect(sc, self.acc2 if i == 5 else self.acc, (bx + 2, yy + 5, int((bw - 4) * v), 6))
             self.text("%3d" % int(v * 100), 12, self.fg, (r.right, yy), "tr")
 
     def p_thr(self, r, _e, k):
         sc, t = self.scene, self.t
         for g in range(1, 4):
-            pygame.draw.line(sc, self.dim, (r.x, r.y + r.h * g // 4), (r.right, r.y + r.h * g // 4))
+            D.line(sc, self.dim, (r.x, r.y + r.h * g // 4), (r.right, r.y + r.h * g // 4))
         pts = []
         for i in range(0, 100):
             u = t * 2.2 + i * 0.09 + k * 3
             v = 0.5 + 0.2 * math.sin(u * 0.8) + 0.12 * math.sin(u * 2.1 + 1) + 0.05 * math.sin(u * 5.3)
             pts.append((r.x + i * r.w / 99, r.bottom - v * r.h))
-        pygame.draw.polygon(sc, L(self.panelc, self.acc, 0.18), [(r.x, r.bottom)] + pts + [(r.right, r.bottom)])
-        pygame.draw.lines(sc, self.acc, False, pts, 2)
-        pygame.draw.circle(sc, self.acc2, pts[0], 4)
+        D.polygon(sc, L(self.panelc, self.acc, 0.18), [(r.x, r.bottom)] + pts + [(r.right, r.bottom)])
+        D.lines(sc, self.acc, False, pts, 2)
+        D.circle(sc, self.acc2, pts[0], 4)
 
     def p_mesh(self, r, _e, k):
         sc, t = self.scene, self.t
@@ -611,7 +676,7 @@ class Hud:
             for i in range(20):
                 v = 0.5 + 0.5 * math.sin(t * (0.4 + 0.13 * ((i * 7 + j * 3) % 5)) + i * 0.7 + j * 1.3 + k)
                 col = self.acc2 if v > 0.985 else self.rp[int(v * 15)]
-                pygame.draw.rect(sc, col, (r.x + i * cw + 1, r.y + j * ch + 1, cw - 3, ch - 3))
+                D.rect(sc, col, (r.x + i * cw + 1, r.y + j * ch + 1, cw - 3, ch - 3))
 
     def p_spec(self, r, _e, k):
         sc, t = self.scene, self.t
@@ -622,9 +687,9 @@ class Hud:
             v = abs(math.sin(i * 0.45 + t * 1.6 + k) * 0.6 + math.sin(i * 0.17 - t * 0.9) * 0.4) * (1 - 0.35 * i / n)
             pk[i] = max(v, pk[i] - 0.006)
             hh = int(v * r.h)
-            pygame.draw.rect(sc, self.acc2 if v > 0.88 else self.acc, (r.x + i * bw + 1, r.bottom - hh, bw - 2, hh))
+            D.rect(sc, self.acc2 if v > 0.88 else self.acc, (r.x + i * bw + 1, r.bottom - hh, bw - 2, hh))
             yy = r.bottom - pk[i] * r.h
-            pygame.draw.line(sc, self.fg, (r.x + i * bw + 1, yy), (r.x + i * bw + bw - 2, yy))
+            D.line(sc, self.fg, (r.x + i * bw + 1, yy), (r.x + i * bw + bw - 2, yy))
 
     def p_log(self, r, _e, k):
         n = len(self.logs)
@@ -648,8 +713,8 @@ class Hud:
         cx, cy = r.centerx, r.centery
         pts = [(cx + math.sin(3 * u + t * 0.8 + k) * r.w * 0.45, cy + math.sin(2 * u + t * 0.5) * r.h * 0.45)
                for u in [i * TAU / 120 for i in range(121)]]
-        pygame.draw.lines(self.scene, self.dim, False, [(cx + (x - cx) * 0.6, cy + (y - cy) * 0.6) for x, y in pts], 1)
-        pygame.draw.lines(self.scene, self.acc, False, pts, 2)
+        D.lines(self.scene, self.dim, False, [(cx + (x - cx) * 0.6, cy + (y - cy) * 0.6) for x, y in pts], 1)
+        D.lines(self.scene, self.acc, False, pts, 2)
 
     # ---------- centerpieces ----------
     def gl(self, col):
@@ -659,13 +724,13 @@ class Hud:
         t, sc, acc, acc2, bg, dim = self.t, self.scene, self.acc, self.acc2, self.bg, self.dim
         sw = t * 0.9
         for k in range(0, 46, 2):
-            pygame.draw.line(sc, L(bg, acc, 0.5 * (1 - k / 46) ** 2), C, pol(C, 285, sw - k * 0.018), 5)
-        pygame.draw.line(sc, acc, C, pol(C, 285, sw), 1)
+            D.line(sc, L(bg, acc, 0.5 * (1 - k / 46) ** 2), C, pol(C, 285, sw - k * 0.018), 5)
+        D.line(sc, acc, C, pol(C, 285, sw), 1)
         for ri, r in enumerate((205, 213, 221)):
             prog = 0.5 + 0.5 * math.sin(t * 0.3 + ri * 1.3)
             for i in range(int(prog * 72)):
                 a = i / 72 * TAU - PI / 2
-                pygame.draw.line(sc, acc, pol(C, r, a), pol(C, r + 6, a), 2)
+                D.line(sc, acc, pol(C, r, a), pol(C, r + 6, a), 2)
         for r, sp, span, w, col in ((260, 0.35, 1.2, 3, acc), (268, -0.5, 0.7, 2, acc2), (118, 0.8, 2.0, 2, acc), (126, -1.1, 0.9, 1, acc2)):
             if self.glow:
                 self.arc(r, t * sp, t * sp + span, self.gl(col), w + 4)
@@ -679,7 +744,7 @@ class Hud:
             hit = abs(d) < 0.4
             col = (self.ramp_hot if hit else self.ramp)[int(v * 15)]
             ln = 286 + v * 44
-            pygame.draw.line(sc, col, (C[0] + c * 282, C[1] + s * 282), (C[0] + c * ln, C[1] + s * ln), 2 if hit else 1)
+            D.line(sc, col, (C[0] + c * 282, C[1] + s * 282), (C[0] + c * ln, C[1] + s * ln), 2 if hit else 1)
         active = int(t / 3.5) % 6
         orb = ((190, -0.9, 0.12), (235, -0.2, -0.08), (170, 0.8, 0.15), (225, 1.9, -0.10), (250, 3.0, 0.07), (140, 4.2, -0.13))
         for idx, (nid, name) in enumerate(self.nodes):
@@ -687,13 +752,13 @@ class Hud:
             p = pol(C, r, a0 + t * sp)
             on = idx == active
             lc = acc2 if on else L(bg, acc, 0.4)
-            pygame.draw.line(sc, lc, C, p, 1)
+            D.line(sc, lc, C, p, 1)
             pk = (t * 0.45 + idx * 0.37) % 1
-            pygame.draw.circle(sc, acc2 if on else self.fg, (C[0] + (p[0] - C[0]) * pk, C[1] + (p[1] - C[1]) * pk), 2)
+            D.circle(sc, acc2 if on else self.fg, (C[0] + (p[0] - C[0]) * pk, C[1] + (p[1] - C[1]) * pk), 2)
             pr = 14 + (t * 14 + idx * 5) % 16
-            pygame.draw.circle(sc, L(bg, acc2 if on else acc, 1 - (pr - 14) / 16), p, int(pr), 1)
-            pygame.draw.circle(sc, self.corec, p, 14)
-            pygame.draw.circle(sc, acc2 if on else acc, p, 14, 2)
+            D.circle(sc, L(bg, acc2 if on else acc, 1 - (pr - 14) / 16), p, int(pr), 1)
+            D.circle(sc, self.corec, p, 14)
+            D.circle(sc, acc2 if on else acc, p, 14, 2)
             self.text(nid, 13, (240, 240, 240) if self.th.get("light") else self.fg, p, "c", bold=True)
             self.text(name, 11, acc2 if on else self.fg, (p[0] + 20, p[1] - 6))
             if on:
@@ -702,16 +767,16 @@ class Hud:
 
     def core(self):
         t, sc, acc = self.t, self.scene, self.acc
-        pygame.draw.circle(sc, L(self.bg, acc, 0.25), C, int(66 + 4 * math.sin(t * 2)), 1)
-        pygame.draw.circle(sc, self.corec, C, 48)
+        D.circle(sc, L(self.bg, acc, 0.25), C, int(66 + 4 * math.sin(t * 2)), 1)
+        D.circle(sc, self.corec, C, 48)
         for i in range(6):
             w = int(abs(math.cos(t * 0.6 + i * PI / 6)) * 48)
             if w > 1:
-                pygame.draw.ellipse(sc, L(self.corec, acc, 0.55), (C[0] - w, C[1] - 48, 2 * w, 96), 1)
+                D.ellipse(sc, L(self.corec, acc, 0.55), (C[0] - w, C[1] - 48, 2 * w, 96), 1)
         for dy in (-30, -15, 0, 15, 30):
             hw = int(math.sqrt(48 ** 2 - dy ** 2))
-            pygame.draw.ellipse(sc, L(self.corec, acc, 0.35), (C[0] - hw, C[1] + dy - 5, 2 * hw, 10), 1)
-        pygame.draw.circle(sc, acc, C, 48, 2)
+            D.ellipse(sc, L(self.corec, acc, 0.35), (C[0] - hw, C[1] + dy - 5, 2 * hw, 10), 1)
+        D.circle(sc, acc, C, 48, 2)
         self.text("AETHER", 15, (255, 255, 255), (C[0], C[1] - 6), "c", bold=True)
         self.text("0x%06X" % (0x4F2A91 + int(t * 3) % 4096), 10, acc, (C[0], C[1] + 9), "c")
 
@@ -719,7 +784,7 @@ class Hud:
         t, sc, acc, acc2, bg = self.t, self.scene, self.acc, self.acc2, self.bg
         sw = t * 0.7
         for k in range(0, 40, 2):
-            pygame.draw.line(sc, L(bg, acc, 0.4 * (1 - k / 40) ** 2), C, pol(C, 300, sw - k * 0.02), 5)
+            D.line(sc, L(bg, acc, 0.4 * (1 - k / 40) ** 2), C, pol(C, 300, sw - k * 0.02), 5)
         for r, sp, n, fr, w in ((120, 0.5, 24, 0.6, 3), (170, -0.35, 36, 0.5, 2), (240, 0.2, 48, 0.55, 2), (290, -0.12, 60, 0.4, 1)):
             self.dashed(sc, r, acc if w > 1 else self.dim, n, rot=t * sp, frac=fr, w=w)
         for r in (60, 120, 180, 240, 300):
@@ -730,23 +795,23 @@ class Hud:
             col = acc2 if on else acc
             for m in range(1, 9):
                 q = (C[0] + math.sin(fx * (t - m * 0.25) + px) * rx, C[1] + math.sin(fy * (t - m * 0.25) + py) * ry)
-                pygame.draw.circle(sc, L(bg, col, 0.55 * (1 - m / 9)), q, 2)
+                D.circle(sc, L(bg, col, 0.55 * (1 - m / 9)), q, 2)
             x, y = C[0] + math.sin(fx * t + px) * rx, C[1] + math.sin(fy * t + py) * ry
-            pygame.draw.polygon(sc, col, [(x, y - 7), (x + 7, y), (x, y + 7), (x - 7, y)], 2 if on else 1)
+            D.polygon(sc, col, [(x, y - 7), (x + 7, y), (x, y + 7), (x - 7, y)], 2 if on else 1)
             self.text(self.nodes[i][0].upper(), 10, self.fg, (x + 10, y - 5))
             if on:
                 s = 24 + 4 * math.sin(t * 6)
                 for sx, sy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
                     cx, cy = x + sx * s, y + sy * s
-                    pygame.draw.line(sc, acc2, (cx, cy), (cx - sx * 10, cy), 2)
-                    pygame.draw.line(sc, acc2, (cx, cy), (cx, cy - sy * 10), 2)
-                pygame.draw.line(sc, L(bg, acc2, 0.45), C, (x, y), 1)
+                    D.line(sc, acc2, (cx, cy), (cx - sx * 10, cy), 2)
+                    D.line(sc, acc2, (cx, cy), (cx, cy - sy * 10), 2)
+                D.line(sc, L(bg, acc2, 0.45), C, (x, y), 1)
                 self.text("%s  RNG %.1fkm" % (self.nodes[i][1], math.hypot(x - C[0], y - C[1]) / 6), 11, acc2, (x + 16, y + s + 6))
         for a in range(4):
             c, s = math.cos(a * PI / 2), math.sin(a * PI / 2)
-            pygame.draw.line(sc, acc, (C[0] + c * 14, C[1] + s * 14), (C[0] + c * 40, C[1] + s * 40), 2)
-        pygame.draw.circle(sc, acc, C, 8, 1)
-        pygame.draw.circle(sc, self.gl(acc), C, 14, 3)
+            D.line(sc, acc, (C[0] + c * 14, C[1] + s * 14), (C[0] + c * 40, C[1] + s * 40), 2)
+        D.circle(sc, acc, C, 8, 1)
+        D.circle(sc, self.gl(acc), C, 14, 3)
 
     def c_rain(self):
         t, sc = self.t, self.scene
@@ -760,22 +825,22 @@ class Hud:
                     dx, dy = x - 800, y - 440
                     if dx * dx + dy * dy < R2:
                         ch = (j * 31 + row * 17 + int(t * sp * 0.35)) % self.ng
-                        sc.blit(self.glyph[min(k, 13)][ch], (x, y))
-        pygame.draw.circle(sc, self.bg, C, 92)
-        pygame.draw.circle(sc, self.acc, C, 92, 2)
+                        sc.blit(self.glyph[min(k, 13)][ch], (int((x + OX) * S), int((y + OY) * S)))
+        D.circle(sc, self.bg, C, 92)
+        D.circle(sc, self.acc, C, 92, 2)
         self.dashed(sc, 104, self.acc, 36, rot=t * 0.6, frac=0.5, w=2)
         self.dashed(sc, 118, self.acc2, 24, rot=-t * 0.4, frac=0.3, w=1)
         for i in range(8):
-            pygame.draw.circle(sc, self.fg if i == 0 else self.acc, pol(C, 70, t * 0.8 + i * PI / 4), 3)
+            D.circle(sc, self.fg if i == 0 else self.acc, pol(C, 70, t * 0.8 + i * PI / 4), 3)
         self.text("NEO", 22, self.fg, (C[0], C[1] - 8), "c", bold=True)
         self.text("0x%06X" % (0x7E0001 + int(t * 9) % 4096), 11, self.acc, (C[0], C[1] + 14), "c")
 
     def c_ribbons(self):
         t, sc = self.t, self.scene
-        sc.set_clip(BOX)
+        self.clip(sc, BOX)
         for (px, py, ph) in self.stars:
             v = 0.5 + 0.5 * math.sin(t * 1.5 + ph)
-            sc.fill(self.rf[int(4 + v * 11)], (px, py, 2, 2))
+            self.fillr(sc, self.rf[int(4 + v * 11)], (px, py, 2, 2))
         for k in range(3):
             def fy(x, s=0):
                 u = x * 0.011
@@ -783,13 +848,13 @@ class Hud:
                         + 30 * math.sin(u * 2.7 - t * 0.8 + s * 0.08) + 16 * math.sin(u * 5.1 + t * 1.3))
             for x in range(470, 1131, 10):
                 y = fy(x, 4) + 20
-                pygame.draw.line(sc, self.aur_dim[k], (x, y), (x, y + 70 + 30 * math.sin(x * 0.05 + t)), 3)
+                D.line(sc, self.aur_dim[k], (x, y), (x, y + 70 + 30 * math.sin(x * 0.05 + t)), 3)
             for s in range(9):
                 pts = [(x, fy(x, s) + s * 5) for x in range(470, 1131, 14)]
-                pygame.draw.lines(sc, self.aur[k][s], False, pts, 2)
-        pygame.draw.circle(sc, self.panelc, (800, 1090), 340)
-        pygame.draw.circle(sc, self.acc, (800, 1090), 340, 2)
-        pygame.draw.circle(sc, self.gl(self.acc), (800, 1090), 345, 4)
+                D.lines(sc, self.aur[k][s], False, pts, 2)
+        D.circle(sc, self.panelc, (800, 1090), 340)
+        D.circle(sc, self.acc, (800, 1090), 340, 2)
+        D.circle(sc, self.gl(self.acc), (800, 1090), 345, 4)
         sc.set_clip(None)
 
     def c_orrery(self):
@@ -799,26 +864,26 @@ class Hud:
         speeds = (1.6, 1.15, 0.85, 0.62, 0.34, 0.22)
         sizes = (4, 6, 7, 5, 12, 9)
         for r in radii:
-            pygame.draw.ellipse(sc, L(bg, self.dim, 0.9), (C[0] - r, C[1] - r * 0.92, 2 * r, 2 * r * 0.92), 1)
+            D.ellipse(sc, L(bg, self.dim, 0.9), (C[0] - r, C[1] - r * 0.92, 2 * r, 2 * r * 0.92), 1)
         for ang, rr, br in self.belt:
             a = ang + t * 0.08
-            sc.fill(self.rf[5 + int(br * 6)], (C[0] + math.cos(a) * rr, C[1] + math.sin(a) * rr * 0.92, 2, 2))
+            self.fillr(sc, self.rf[5 + int(br * 6)], (C[0] + math.cos(a) * rr, C[1] + math.sin(a) * rr * 0.92, 2, 2))
         for r in (30, 25, 20):
-            pygame.draw.circle(sc, L(bg, acc, 0.12 + (30 - r) * 0.04 + 0.03 * math.sin(t * 3)), C, r + int(2 * math.sin(t * 2)))
-        pygame.draw.circle(sc, acc2, C, 17)
-        pygame.draw.circle(sc, (255, 240, 200), C, 11)
+            D.circle(sc, L(bg, acc, 0.12 + (30 - r) * 0.04 + 0.03 * math.sin(t * 3)), C, r + int(2 * math.sin(t * 2)))
+        D.circle(sc, acc2, C, 17)
+        D.circle(sc, (255, 240, 200), C, 11)
         for i, (r, sp, sz) in enumerate(zip(radii, speeds, sizes)):
             a = t * sp * 0.4 + i * 1.3
             pts = [(C[0] + math.cos(a - m * 0.05) * r, C[1] + math.sin(a - m * 0.05) * r * 0.92) for m in range(16)]
-            pygame.draw.lines(sc, L(bg, self.pc[i], 0.5), False, pts, 2)
+            D.lines(sc, L(bg, self.pc[i], 0.5), False, pts, 2)
             p = (C[0] + math.cos(a) * r, C[1] + math.sin(a) * r * 0.92)
             col = self.pc[i]
             if i == 5:
-                pygame.draw.ellipse(sc, self.fg, (p[0] - 20, p[1] - 5, 40, 10), 1)
-                pygame.draw.ellipse(sc, L(bg, col, 0.6), (p[0] - 15, p[1] - 3, 30, 6), 1)
-            pygame.draw.circle(sc, col, p, sz)
+                D.ellipse(sc, self.fg, (p[0] - 20, p[1] - 5, 40, 10), 1)
+                D.ellipse(sc, L(bg, col, 0.6), (p[0] - 15, p[1] - 3, 30, 6), 1)
+            D.circle(sc, col, p, sz)
             if i == 2:
-                pygame.draw.circle(sc, self.fg, (p[0] + math.cos(t * 3) * 16, p[1] + math.sin(t * 3) * 16), 2)
+                D.circle(sc, self.fg, (p[0] + math.cos(t * 3) * 16, p[1] + math.sin(t * 3) * 16), 2)
             on = i == active
             if on:
                 self.dashed(sc, sz + 9, acc2, 12, c=p, rot=t * 2)
@@ -836,57 +901,57 @@ class Hud:
                            + 0.05 * math.sin(7 * a + t * 0.2))
                 pts.append((C[0] + c * rr, C[1] + s * rr))
             idx = lv % 5 == 0
-            pygame.draw.lines(sc, acc2 if idx else L(self.dim, acc, lv / 11), True, pts, 2 if idx else 1)
+            D.lines(sc, acc2 if idx else L(self.dim, acc, lv / 11), True, pts, 2 if idx else 1)
         for (bx, by, sp, ph) in self.bubbles:
             y = 770 - (by + t * sp) % 680
             x = bx + math.sin(t + ph) * 6
             if (x - 800) ** 2 + (y - 440) ** 2 < 330 * 330:
-                pygame.draw.circle(sc, L(bg, acc, 0.5), (x, y), 2, 1)
+                D.circle(sc, L(bg, acc, 0.5), (x, y), 2, 1)
         sweep = t * 0.7
-        pygame.draw.line(sc, L(bg, acc, 0.7), C, pol(C, 320, sweep), 1)
+        D.line(sc, L(bg, acc, 0.7), C, pol(C, 320, sweep), 1)
         pr = (t % 3) / 3 * 330
-        pygame.draw.circle(sc, L(bg, acc, 1 - pr / 330), C, int(pr), 2)
+        D.circle(sc, L(bg, acc, 1 - pr / 330), C, int(pr), 2)
         for i, (r, a, dr) in enumerate(self.contacts):
             ang = a + t * dr
             p = pol(C, r, ang)
             lit = max(0.0, 1 - ((sweep - ang) % TAU) / 1.6)
             col = L(bg, acc2 if i == int(t / 3.5) % 6 else acc, 0.2 + 0.8 * lit)
-            pygame.draw.circle(sc, col, p, 5)
-            pygame.draw.circle(sc, col, p, 5 + int((1 - lit) * 8), 1)
+            D.circle(sc, col, p, 5)
+            D.circle(sc, col, p, 5 + int((1 - lit) * 8), 1)
             self.text(self.nodes[i][1], 10, col, (p[0] + 10, p[1] - 5))
-        pygame.draw.circle(sc, acc, C, 5)
-        pygame.draw.circle(sc, self.gl(acc), C, 11, 3)
+        D.circle(sc, acc, C, 5)
+        D.circle(sc, self.gl(acc), C, 11, 3)
 
     def c_synth(self):
         t, sc, acc, acc2, bg = self.t, self.scene, self.acc, self.acc2, self.bg
-        sc.set_clip(BOX)
+        self.clip(sc, BOX)
         hz = 430
         top = (30, 6, 70)
         for i in range(22):
             y0 = 100 + i * (hz - 100) / 22
             f = i / 21
-            sc.fill(L(L(bg, top, min(1, f * 1.6)), (170, 30, 120), max(0, f - 0.55) * 1.8), (BOX.x, y0, BOX.w, (hz - 100) / 22 + 1))
+            self.fillr(sc, L(L(bg, top, min(1, f * 1.6)), (170, 30, 120), max(0, f - 0.55) * 1.8), (BOX.x, y0, BOX.w, (hz - 100) / 22 + 1))
         for (px, py, ph) in self.syn_stars:
-            sc.fill(self.rf[int(6 + 9 * (0.5 + 0.5 * math.sin(t * 2 + ph)))], (px, py, 2, 2))
+            self.fillr(sc, self.rf[int(6 + 9 * (0.5 + 0.5 * math.sin(t * 2 + ph)))], (px, py, 2, 2))
         for y in range(250, 431, 2):
             f = (y - 250) / 180
             dx = math.sqrt(max(0, 110 * 110 - (y - 360) ** 2))
             if dx > 0:
                 gap = ((y - 250) // 2 + int(t * 8)) % 9 < int(f * 6) and f > 0.45
                 if not gap:
-                    pygame.draw.line(sc, L(self.acc3, acc, f), (800 - dx, y), (800 + dx, y), 2)
+                    D.line(sc, L(self.acc3, acc, f), (800 - dx, y), (800 + dx, y), 2)
         for off, col in ((0, L(bg, acc2, 0.35)), (1, acc2)):
             pts = [(x, y + 18 * (1 - off) + 6 * math.sin(x * 0.09 + off)) for x, y in self.mount]
-            pygame.draw.lines(sc, col, False, pts, 2)
-        sc.fill(L(bg, (30, 0, 50), 0.8), (BOX.x, hz, BOX.w, BOX.bottom - hz))
-        pygame.draw.line(sc, acc, (BOX.x, hz), (BOX.right, hz), 2)
+            D.lines(sc, col, False, pts, 2)
+        self.fillr(sc, L(bg, (30, 0, 50), 0.8), (BOX.x, hz, BOX.w, BOX.bottom - hz))
+        D.line(sc, acc, (BOX.x, hz), (BOX.right, hz), 2)
         off = (t * 0.7) % 1
         for k in range(16):
             z = (k + off) / 16
             y = hz + (z ** 2.2) * 340
-            pygame.draw.line(sc, L(bg, acc2, 0.25 + 0.75 * z), (BOX.x, y), (BOX.right, y), 1 if z < 0.5 else 2)
+            D.line(sc, L(bg, acc2, 0.25 + 0.75 * z), (BOX.x, y), (BOX.right, y), 1 if z < 0.5 else 2)
         for i in range(-14, 15):
-            pygame.draw.line(sc, L(bg, acc2, 0.55), (800 + i * 14, hz), (800 + i * 105, BOX.bottom), 1)
+            D.line(sc, L(bg, acc2, 0.55), (800 + i * 14, hz), (800 + i * 105, BOX.bottom), 1)
         sc.set_clip(None)
 
     def c_tesseract(self):
@@ -894,7 +959,7 @@ class Hud:
         for i in range(3):
             tilt = 0.15 + 0.85 * abs(math.cos(t * 0.3 + i * 1.0))
             r = 270 - i * 12
-            pygame.draw.ellipse(sc, L(bg, acc, 0.35), (C[0] - r, C[1] - r * tilt, 2 * r, 2 * r * tilt), 1)
+            D.ellipse(sc, L(bg, acc, 0.35), (C[0] - r, C[1] - r * tilt, 2 * r, 2 * r * tilt), 1)
         self.dashed(sc, 300, self.dim, 90, rot=t * 0.2)
         a1, a2, a3, a4 = t * 0.5, t * 0.37, t * 0.23, t * 0.19
         P = []
@@ -914,15 +979,15 @@ class Hud:
             P.append((C[0] + x * f3 * 235, C[1] + y * f3 * 235, w))
         for i, j in HE:
             d = (P[i][2] + P[j][2]) / 4 + 0.5
-            pygame.draw.line(sc, self.ramp[int(max(0, min(1, d)) * 15)], P[i][:2], P[j][:2], 2)
+            D.line(sc, self.ramp[int(max(0, min(1, d)) * 15)], P[i][:2], P[j][:2], 2)
         for x, y, w in P:
-            pygame.draw.circle(sc, acc2, (x, y), 3 + int((w + 1) * 1.5))
-        pygame.draw.circle(sc, self.gl(acc), C, 40, 2)
+            D.circle(sc, acc2, (x, y), 3 + int((w + 1) * 1.5))
+        D.circle(sc, self.gl(acc), C, 40, 2)
         for i in range(30):
             y = 110 + (i * 53 + t * (14 + i % 5 * 4)) % 660
             x = 800 + math.sin(i * 2.4 + t * 0.3) * (150 + i * 8)
             if (x - 800) ** 2 + (y - 440) ** 2 < 335 ** 2:
-                sc.fill(self.rf[8 + i % 7], (x, y, 2, 2))
+                self.fillr(sc, self.rf[8 + i % 7], (x, y, 2, 2))
 
     def c_atom(self):
         t, sc, acc, acc2, acc3, bg = self.t, self.scene, self.acc, self.acc2, self.acc3, self.bg
@@ -931,22 +996,22 @@ class Hud:
         for (x, y, z) in self.cloud:
             xr, zr = x * ca + z * sa, -x * sa + z * ca
             br = int(3 + 8 * (zr / 280 + 0.5))
-            sc.fill(self.rf[max(2, min(11, br))], (C[0] + xr, C[1] + y * 0.8 + zr * 0.3, 2, 2))
+            self.fillr(sc, self.rf[max(2, min(11, br))], (C[0] + xr, C[1] + y * 0.8 + zr * 0.3, 2, 2))
         for k, (a, b) in enumerate(((220, 70), (180, 52), (250, 95))):
             phi = k * 1.05 + t * 0.12
             cp, sp = math.cos(phi), math.sin(phi)
 
             def op(u):
                 return (C[0] + a * math.cos(u) * cp - b * math.sin(u) * sp, C[1] + a * math.cos(u) * sp + b * math.sin(u) * cp)
-            pygame.draw.lines(sc, L(bg, acc, 0.45), True, [op(i * TAU / 80) for i in range(80)], 1)
+            D.lines(sc, L(bg, acc, 0.45), True, [op(i * TAU / 80) for i in range(80)], 1)
             ue = t * (1.4 - k * 0.3) + k * 2
             for m in range(14):
-                pygame.draw.circle(sc, L(bg, acc2 if k == 0 else acc3, 1 - m / 14), op(ue - m * 0.09), max(1, 5 - m // 3))
+                D.circle(sc, L(bg, acc2 if k == 0 else acc3, 1 - m / 14), op(ue - m * 0.09), max(1, 5 - m // 3))
         for i in range(10):
             a = t * 0.9 + i * 1.7
             r = 14 * abs(math.sin(a * 0.7 + i))
-            pygame.draw.circle(sc, acc if i % 2 else acc3, (C[0] + math.cos(a) * r, C[1] + math.sin(a * 1.3) * r), 6)
-        pygame.draw.circle(sc, self.gl(acc), C, 26 + int(3 * math.sin(t * 3)), 4)
+            D.circle(sc, acc if i % 2 else acc3, (C[0] + math.cos(a) * r, C[1] + math.sin(a * 1.3) * r), 6)
+        D.circle(sc, self.gl(acc), C, 26 + int(3 * math.sin(t * 3)), 4)
 
     def c_gears(self):
         t, sc, fg, acc2, dim = self.t, self.scene, self.fg, self.acc2, self.dim
@@ -969,54 +1034,214 @@ class Hud:
                 a = th_ + k * step
                 for off, rr in ((-0.32, 0.88), (-0.2, 1.04), (0.2, 1.04), (0.32, 0.88)):
                     pts.append((cen[0] + math.cos(a + off * step) * r * rr, cen[1] + math.sin(a + off * step) * r * rr))
-            pygame.draw.polygon(sc, self.panelc, pts)
-            pygame.draw.polygon(sc, fg, pts, 2)
-            pygame.draw.circle(sc, dim, cen, int(r * 0.62), 1)
-            pygame.draw.circle(sc, fg, cen, int(r * 0.22), 2)
+            D.polygon(sc, self.panelc, pts)
+            D.polygon(sc, fg, pts, 2)
+            D.circle(sc, dim, cen, int(r * 0.62), 1)
+            D.circle(sc, fg, cen, int(r * 0.22), 2)
             for k in range(5):
                 a = th_ + k * TAU / 5
-                pygame.draw.line(sc, dim, (cen[0] + math.cos(a) * r * 0.22, cen[1] + math.sin(a) * r * 0.22),
+                D.line(sc, dim, (cen[0] + math.cos(a) * r * 0.22, cen[1] + math.sin(a) * r * 0.22),
                                  (cen[0] + math.cos(a) * r * 0.62, cen[1] + math.sin(a) * r * 0.62), 1)
             self.dashed(sc, int(r * 1.0), acc2, max(12, n), c=cen, frac=0.3)
             lab = pol(cen, r * 1.18, -PI / 4 - i * 0.7)
-            pygame.draw.line(sc, acc2, pol(cen, r, -PI / 4 - i * 0.7), lab, 1)
+            D.line(sc, acc2, pol(cen, r, -PI / 4 - i * 0.7), lab, 1)
             self.text("Ø%d.00" % (r * 2), 11, acc2, (lab[0] + 3, lab[1] - 12))
-        pygame.draw.line(sc, acc2, (C[0] - 120, 600), (C[0] + 120, 600), 1)
+        D.line(sc, acc2, (C[0] - 120, 600), (C[0] + 120, 600), 1)
         for sx in (-120, 120):
-            pygame.draw.line(sc, acc2, (C[0] + sx, 592), (C[0] + sx, 608), 1)
+            D.line(sc, acc2, (C[0] + sx, 592), (C[0] + sx, 608), 1)
         self.text("240.00", 12, acc2, (C[0], 612), "c")
 
 
-def main():
-    args = sys.argv
-    shot = frames = None
-    start = 0
-    if "--shot" in args:
-        i = args.index("--shot")
-        shot, frames = args[i + 1], int(args[i + 2])
-    if "--theme" in args:
-        start = int(args[args.index("--theme") + 1])
-    pygame.init()
-    pygame.display.set_caption("HOLOGRID")
-    flags = pygame.SCALED | pygame.RESIZABLE
+
+# ======================= configuration, setup screen, main loop =======================
+CFG_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "HoloGrid")
+CFG_PATH = os.path.join(CFG_DIR, "config.json")
+DEFAULT_CFG = {"monitor": 0, "fullscreen": True, "theme": 0}
+
+
+def load_cfg():
     try:
-        win = pygame.display.set_mode((W, H), flags, vsync=0 if shot else 1)
+        with open(CFG_PATH, encoding="utf-8") as f:
+            cfg = dict(DEFAULT_CFG)
+            cfg.update(json.load(f))
+            return cfg
     except Exception:
-        win = pygame.display.set_mode((W, H), flags)
-    bench = "--bench" in args
-    hud = Hud(start)
-    t_bench = time.perf_counter()
+        return None
+
+
+def save_cfg(cfg):
+    try:
+        os.makedirs(CFG_DIR, exist_ok=True)
+        with open(CFG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    except Exception:
+        pass
+
+
+def desktop_sizes():
+    try:
+        sizes = pygame.display.get_desktop_sizes()
+        if sizes:
+            return list(sizes)
+    except Exception:
+        pass
+    info = pygame.display.Info()
+    return [(info.current_w, info.current_h)]
+
+
+def run_setup(cfg):
+    """First-start setup: choose the monitor and whether to start fullscreen. Returns cfg or None."""
+    sizes = desktop_sizes()
+    sel = min(cfg.get("monitor", 0), len(sizes) - 1)
+    full = bool(cfg.get("fullscreen", True))
+    WW, WH = 820, 520
+    BG, FG, ACC, ACC2, DIM = (4, 8, 15), (200, 238, 255), (0, 229, 255), (255, 176, 32), (34, 62, 82)
+
+    def open_win():
+        try:
+            return pygame.display.set_mode((WW, WH), 0, display=sel)
+        except Exception:
+            return pygame.display.set_mode((WW, WH))
+    win = open_win()
+    pygame.display.set_caption("HoloGrid Setup")
+    fn = lambda sz, b=False: pygame.font.SysFont("consolas,couriernew,monospace", sz, bold=b)  # noqa: E731
+    f_title, f_mid, f_sm = fn(34, True), fn(17), fn(14)
     clock = pygame.time.Clock()
+    cards = []
+    per = min(4, len(sizes))
+    cw_, ch_ = 170, 130
+    x0 = (WW - (per * cw_ + (per - 1) * 16)) // 2
+    for i in range(len(sizes)):
+        cards.append(pygame.Rect(x0 + (i % per) * (cw_ + 16), 170 + (i // per) * (ch_ + 14), cw_, ch_))
+    check = pygame.Rect(60, 400, 26, 26)
+    start_btn = pygame.Rect(WW - 260, 410, 200, 48)
+    t = 0.0
+    while True:
+        dt = clock.tick(30) / 1000
+        t += dt
+        change = None
+        go = False
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                return None
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE:
+                    return None
+                if e.key in (pygame.K_RIGHT, pygame.K_DOWN, pygame.K_TAB):
+                    change = (sel + 1) % len(sizes)
+                elif e.key in (pygame.K_LEFT, pygame.K_UP):
+                    change = (sel - 1) % len(sizes)
+                elif pygame.K_1 <= e.key <= pygame.K_9 and e.key - pygame.K_1 < len(sizes):
+                    change = e.key - pygame.K_1
+                elif e.key in (pygame.K_SPACE, pygame.K_f):
+                    full = not full
+                elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                    go = True
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                for i, r in enumerate(cards):
+                    if r.collidepoint(e.pos):
+                        change = i
+                if check.inflate(300, 10).collidepoint(e.pos):
+                    full = not full
+                if start_btn.collidepoint(e.pos):
+                    go = True
+        if go:
+            cfg = dict(cfg)
+            cfg["monitor"], cfg["fullscreen"] = sel, full
+            return cfg
+        if change is not None and change != sel:
+            sel = change
+            win = open_win()
+            pygame.display.set_caption("HoloGrid Setup")
+        win.fill(BG)
+        for gx in range(0, WW, 40):
+            for gy in range(0, WH, 40):
+                win.set_at((gx, gy), (14, 26, 38))
+        pygame.draw.rect(win, ACC, (0, 0, WW, 3))
+        win.blit(f_title.render("HOLOGRID SETUP", True, FG), (40, 28))
+        win.blit(f_sm.render("Choose the monitor HoloGrid should use. This window jumps to the selected monitor.", True, (120, 160, 185)), (42, 78))
+        win.blit(f_mid.render("MONITOR", True, ACC), (42, 130))
+        for i, r in enumerate(cards):
+            on = i == sel
+            pygame.draw.rect(win, (7, 15, 25), r)
+            pygame.draw.rect(win, ACC if on else DIM, r, 3 if on else 1)
+            mw, mh = sizes[i]
+            ar = mw / max(mh, 1)
+            bw = 110 if ar >= 1 else int(110 * ar)
+            bh = int(bw / ar)
+            if bh > 62:
+                bh = 62
+                bw = int(bh * ar)
+            scr = pygame.Rect(0, 0, bw, bh)
+            scr.center = (r.centerx, r.y + 46)
+            pygame.draw.rect(win, (0, 60, 80) if on else (14, 30, 44), scr)
+            pygame.draw.rect(win, ACC if on else (60, 100, 120), scr, 2)
+            pygame.draw.line(win, ACC if on else (60, 100, 120), (r.centerx - 14, scr.bottom + 6), (r.centerx + 14, scr.bottom + 6), 2)
+            lab = fn(18, True).render(str(i + 1), True, ACC if on else FG)
+            win.blit(lab, lab.get_rect(center=scr.center))
+            nm = "Display %d%s" % (i + 1, "  (primary)" if i == 0 else "")
+            win.blit(f_sm.render(nm, True, FG), f_sm.render(nm, True, FG).get_rect(center=(r.centerx, r.y + 96)))
+            rs = "%d x %d" % (mw, mh)
+            win.blit(f_sm.render(rs, True, ACC2 if on else (120, 160, 185)), f_sm.render(rs, True, FG).get_rect(center=(r.centerx, r.y + 114)))
+        pygame.draw.rect(win, ACC if full else DIM, check, 2)
+        if full:
+            pygame.draw.rect(win, ACC, check.inflate(-10, -10))
+        win.blit(f_mid.render("Start in fullscreen", True, FG), (100, 398))
+        win.blit(f_sm.render("F11 toggles fullscreen or window any time.", True, (120, 160, 185)), (100, 424))
+        pulse = 0.5 + 0.5 * math.sin(t * 4)
+        pygame.draw.rect(win, (0, int(120 + 80 * pulse), int(150 + 80 * pulse)), start_btn, 0, border_radius=6)
+        lab = f_mid.render("START  [Enter]", True, (0, 10, 16))
+        win.blit(lab, lab.get_rect(center=start_btn.center))
+        win.blit(f_sm.render("Left/Right or 1-9: monitor   Space: fullscreen   Esc: quit", True, (90, 130, 155)), (42, WH - 34))
+        pygame.display.flip()
+
+
+def open_display(cfg):
+    sizes = desktop_sizes()
+    idx = max(0, min(cfg.get("monitor", 0), len(sizes) - 1))
+    mw, mh = sizes[idx]
+    if cfg.get("fullscreen", True):
+        size, flags = (mw, mh), pygame.FULLSCREEN
+    else:
+        ww = int(min(mw * 0.82, mh * 0.82 * 1.6))
+        size, flags = (max(960, ww), max(600, int(ww / 1.6))), pygame.RESIZABLE
+    if flags == pygame.FULLSCREEN:
+        # GPU-presented, vsynced fullscreen at native resolution (logical size == monitor size -> 1:1, no resampling)
+        try:
+            return pygame.display.set_mode(size, flags | pygame.SCALED, display=idx, vsync=1)
+        except Exception:
+            pass
+    try:
+        return pygame.display.set_mode(size, flags, display=idx)
+    except Exception:
+        return pygame.display.set_mode(size, flags)
+
+
+def run_app(cfg, bench=False):
+    """Main HUD loop. Returns 'setup' when the user asks for the setup screen, else 'quit'."""
+    win = open_display(cfg)
+    pygame.display.set_caption("HOLOGRID")
+    hud = Hud(cfg.get("theme", 0))
+    hud.configure(win)
+    clock = pygame.time.Clock()
+    pending = None
     n = 0
     last = time.perf_counter()
+    t_bench = last
     while True:
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
-                return
+                cfg["theme"] = hud.ti
+                save_cfg(cfg)
+                return "quit"
+            if e.type == pygame.VIDEORESIZE and not cfg.get("fullscreen", True):
+                pending = time.perf_counter()
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
-                    return
-                if e.key == pygame.K_SPACE:
+                    cfg["theme"] = hud.ti
+                    save_cfg(cfg)
+                    return "quit"
+                elif e.key == pygame.K_SPACE:
                     hud.paused = not hud.paused
                 elif e.key == pygame.K_t:
                     hud.set_theme(hud.ti + (-1 if e.mod & pygame.KMOD_SHIFT else 1))
@@ -1026,32 +1251,90 @@ def main():
                     hud.set_theme(9)
                 elif e.key == pygame.K_MINUS:
                     hud.set_theme(10)
+                elif e.key == pygame.K_F11:
+                    cfg["fullscreen"] = not cfg.get("fullscreen", True)
+                    win = open_display(cfg)
+                    hud.configure(win)
+                    pending = None
+                elif e.key == pygame.K_m:
+                    cfg["monitor"] = (cfg.get("monitor", 0) + 1) % len(desktop_sizes())
+                    win = open_display(cfg)
+                    hud.configure(win)
+                    pending = None
+                elif e.key == pygame.K_F2:
+                    cfg["theme"] = hud.ti
+                    return "setup"
                 elif e.key == pygame.K_s:
                     out = os.path.join(os.path.expanduser("~"), "Pictures", "hologrid_%d.png" % int(time.time()))
                     try:
                         pygame.image.save(hud.scene, out)
                     except Exception:
                         pass
-                elif e.key == pygame.K_F11:
-                    pygame.display.toggle_fullscreen()
+        if pending is not None and time.perf_counter() - pending > 0.3:
+            pending = None
+            win = pygame.display.get_surface()
+            if win.get_size() != (hud.cw, hud.ch):
+                hud.configure(win)
         now = time.perf_counter()
-        dt = 1 / 60 if shot else min(now - last, 0.05)
+        dt = min(now - last, 0.05)
         last = now
         hud.update(dt)
-        hud.render()
+        if pending is None:
+            hud.render()
+            pygame.display.flip()
         n += 1
-        if bench and n == 360:
-            print("FPS %.1f" % (300 / (time.perf_counter() - t_bench)))
+        if bench:
+            if n == 60:
+                t_bench = time.perf_counter()
+            if n == 360:
+                print("FPS %.1f at %dx%d (scale %.2f)" % (300 / (time.perf_counter() - t_bench), hud.cw, hud.ch, S))
+                return "quit"
+        clock.tick(144 if cfg.get('fullscreen', True) else 60)   # fullscreen is vsynced; windowed is paced
+
+
+def main():
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # sharp, un-stretched pixels on scaled displays
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+    args = sys.argv
+    pygame.init()
+    cfg = load_cfg()
+    bench = "--bench" in args
+    if "--monitor" in args:
+        cfg = dict(cfg or DEFAULT_CFG)
+        cfg["monitor"] = int(args[args.index("--monitor") + 1])
+    if "--windowed" in args:
+        cfg = dict(cfg or DEFAULT_CFG)
+        cfg["fullscreen"] = False
+    if "--theme" in args:
+        cfg = dict(cfg or DEFAULT_CFG)
+        cfg["theme"] = int(args[args.index("--theme") + 1])
+    force_setup = "--setup" in args
+    if (cfg is None and not bench) or force_setup:
+        res = run_setup(cfg or DEFAULT_CFG)
+        if res is None:
             return
-        if bench and n == 60:
-            t_bench = time.perf_counter()
-        if shot and n >= frames:
-            pygame.image.save(hud.scene, shot)
-            return
-        win.blit(hud.scene, (0, 0))
-        pygame.display.flip()
-        if not shot:
-            clock.tick(120)
+        cfg = res
+        save_cfg(cfg)
+    cfg = cfg or dict(DEFAULT_CFG)
+    while True:
+        result = run_app(cfg, bench)
+        if result != "setup":
+            break
+        pygame.display.quit()
+        pygame.display.init()
+        res = run_setup(cfg)
+        pygame.display.quit()
+        pygame.display.init()
+        if res is None:
+            break
+        cfg = res
+        save_cfg(cfg)
 
 
 if __name__ == "__main__":

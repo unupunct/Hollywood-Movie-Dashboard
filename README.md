@@ -10,6 +10,8 @@ It ships with **11 hand-built themes**. Each one has its own palette, its own ce
 
 Built with Python and pygame, packaged as a single Windows executable.
 
+**Sharp on any screen.** HoloGrid renders at your monitor's native pixel resolution (DPI-aware, no stretching), so lines and text stay crisp from a laptop panel to a 4K display. Fullscreen is vsynced and locked to 60 fps; the layout scales and centres itself to any aspect ratio.
+
 ## Themes
 
 | # | Theme | Centerpiece |
@@ -43,13 +45,19 @@ Download **`HoloGrid-Setup.exe`** from the [latest release](../../releases/lates
 
 > Windows SmartScreen may warn about an unsigned app. Choose *More info → Run anyway*.
 
+## First start & setup
+
+The first time you launch HoloGrid a short **setup screen** lets you pick which monitor to use (the setup window jumps to the monitor you select so you can identify it) and whether to start in fullscreen. Your choice is saved to `%APPDATA%\HoloGrid\config.json`. HoloGrid then starts fullscreen on that monitor; press **F11** to drop to a resizable window — the graphics re-render at the new size. Press **F2** any time to reopen setup.
+
 ## Controls
 
 | Key | Action |
 |-----|--------|
 | `T` / `Shift+T` | Next / previous theme |
 | `1`–`9`, `0`, `-` | Jump straight to theme 1–11 |
-| `F11` | Fullscreen |
+| `F11` | Toggle fullscreen / resizable window (graphics adapt to the size) |
+| `M` | Move to the next monitor |
+| `F2` | Reopen the setup screen |
 | `Space` | Pause |
 | `S` | Save a screenshot to your Pictures folder |
 | `Esc` | Quit |
